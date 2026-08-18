@@ -1,0 +1,6 @@
+{
+  "name": "MTK Service Tool",
+  "description": "Native MediaTek BROM Service & Device Information Tool with USB Host and SLA/DAA Auth Bypass support",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

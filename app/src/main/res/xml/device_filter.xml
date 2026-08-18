@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- MediaTek USB VIDs & PIDs -->
+    <!-- MTK USB Port / BROM Mode -->
+    <usb-device vendor-id="3725" product-id="3" />
+    <!-- MTK Preloader -->
+    <usb-device vendor-id="3725" product-id="8192" />
+    <!-- MTK DA / Download Agent -->
+    <usb-device vendor-id="3725" product-id="8193" />
+    <!-- MTK Generic / 0x0616 -->
+    <usb-device vendor-id="3725" product-id="1558" />
+    <!-- MTK Vendor ID fallback -->
+    <usb-device vendor-id="3725" />
+</resources>
