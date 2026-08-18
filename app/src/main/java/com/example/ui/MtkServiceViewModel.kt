@@ -11,6 +11,7 @@ import com.example.model.LogLevel
 import com.example.model.MtkDatabase
 import com.example.model.MtkDeviceInfo
 import com.example.model.MtkModel
+import com.example.protocol.AuthHandlerType
 import com.example.usb.MtkUsbService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -25,6 +26,8 @@ data class MtkUiState(
     val brands: List<Brand> = MtkDatabase.brands,
     val selectedBrand: Brand = MtkDatabase.brands.first(),
     val selectedModel: MtkModel = MtkDatabase.brands.first().models.first(),
+    val authHandlers: List<AuthHandlerType> = AuthHandlerType.entries,
+    val selectedAuthHandler: AuthHandlerType = AuthHandlerType.KAMAKIRI_EP0,
     val isRunning: Boolean = false,
     val isUsbConnected: Boolean = false,
     val connectedDeviceName: String = "",
@@ -76,8 +79,8 @@ class MtkServiceViewModel(application: Application) : AndroidViewModel(applicati
     init {
         usbService.registerReceiver()
         appendLog(LogLevel.SYSTEM, "MTK Client Native Service Engine initialized.")
-        appendLog(LogLevel.USB, "USB Host Interface Active [singleTask Mode: Zero-Restart Protected].")
-        appendLog(LogLevel.INFO, "Instruction: Power off device, hold [Vol+] and [Vol-], plug in OTG cable.")
+        appendLog(LogLevel.USB, "USB Host Interface Active [Strict Byte-to-Byte Sync Mode].")
+        appendLog(LogLevel.INFO, "Ready. Power off device, hold [Vol+] and [Vol-], connect OTG cable.")
         usbService.scanAndConnectDevice()
     }
 
@@ -103,6 +106,11 @@ class MtkServiceViewModel(application: Application) : AndroidViewModel(applicati
         appendLog(LogLevel.SYSTEM, "Target model: ${model.name} (Chipset: ${model.chipset}, HW Code: 0x${String.format("%04X", model.hwCode)})")
     }
 
+    fun selectAuthHandler(handler: AuthHandlerType) {
+        _uiState.update { it.copy(selectedAuthHandler = handler) }
+        appendLog(LogLevel.SYSTEM, "Auth Handler switched to: ${handler.title}")
+    }
+
     fun toggleExplanation() {
         _uiState.update { it.copy(isExplanationExpanded = !it.isExplanationExpanded) }
     }
@@ -110,9 +118,11 @@ class MtkServiceViewModel(application: Application) : AndroidViewModel(applicati
     fun startService() {
         if (_uiState.value.isRunning) return
         val currentModel = _uiState.value.selectedModel
+        val currentHandler = _uiState.value.selectedAuthHandler
         appendLog(LogLevel.SYSTEM, "=== STARTING SERVICE FOR ${currentModel.name} ===")
+        appendLog(LogLevel.SLA, "Selected Bypass Mode: ${currentHandler.title}")
         viewModelScope.launch {
-            usbService.executeServiceRoutine(currentModel)
+            usbService.executeServiceRoutine(currentModel, currentHandler)
         }
     }
 

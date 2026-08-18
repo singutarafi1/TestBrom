@@ -69,6 +69,7 @@ import com.example.model.Brand
 import com.example.model.LogEntry
 import com.example.model.LogLevel
 import com.example.model.MtkModel
+import com.example.protocol.AuthHandlerType
 import com.example.ui.theme.MtkBackground
 import com.example.ui.theme.MtkBorder
 import com.example.ui.theme.MtkOnPrimary
@@ -78,7 +79,6 @@ import com.example.ui.theme.MtkSurfaceVariant
 import com.example.ui.theme.MtkTerminalBg
 import com.example.ui.theme.MtkTerminalCyan
 import com.example.ui.theme.MtkTerminalGreen
-import com.example.ui.theme.MtkTerminalMuted
 import com.example.ui.theme.MtkTerminalPurple
 import com.example.ui.theme.MtkTerminalRed
 import com.example.ui.theme.MtkTerminalYellow
@@ -109,7 +109,7 @@ fun MtkServiceScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
-                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .padding(horizontal = 14.dp, vertical = 6.dp)
         ) {
             // 1. Header with App Identity & USB Status Indicator
             HeaderSection(
@@ -118,27 +118,30 @@ fun MtkServiceScreen(
                 onInfoClick = { viewModel.toggleExplanation() }
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
             // 2. Collapsible Workflow & Logic Explanation Banner
             AnimatedVisibility(visible = state.isExplanationExpanded) {
                 Column {
                     ExplanationCard(onDismiss = { viewModel.toggleExplanation() })
-                    Spacer(modifier = Modifier.height(10.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
                 }
             }
 
-            // 3. Dropdowns (Spinners) for Brand and Model
-            BrandModelSelectionSection(
+            // 3. Selectors: Brand, Model, and Multi-Auth Handler
+            SelectionSection(
                 brands = state.brands,
                 selectedBrand = state.selectedBrand,
                 selectedModel = state.selectedModel,
+                authHandlers = state.authHandlers,
+                selectedAuthHandler = state.selectedAuthHandler,
                 onBrandSelected = { viewModel.selectBrand(it) },
                 onModelSelected = { viewModel.selectModel(it) },
+                onAuthHandlerSelected = { viewModel.selectAuthHandler(it) },
                 enabled = !state.isRunning
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             // 4. START SERVICE Button
             Button(
@@ -146,15 +149,15 @@ fun MtkServiceScreen(
                 enabled = !state.isRunning,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(52.dp)
+                    .height(48.dp)
                     .shadow(
-                        elevation = if (state.isRunning) 0.dp else 10.dp,
-                        shape = RoundedCornerShape(14.dp),
+                        elevation = if (state.isRunning) 0.dp else 8.dp,
+                        shape = RoundedCornerShape(12.dp),
                         ambientColor = MtkPrimary,
                         spotColor = MtkPrimary
                     )
                     .testTag("start_service_button"),
-                shape = RoundedCornerShape(14.dp),
+                shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MtkPrimary,
                     contentColor = MtkOnPrimary,
@@ -164,14 +167,14 @@ fun MtkServiceScreen(
             ) {
                 if (state.isRunning) {
                     CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
+                        modifier = Modifier.size(18.dp),
                         color = MtkOnPrimary,
                         strokeWidth = 2.dp
                     )
-                    Spacer(modifier = Modifier.width(10.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = "EXECUTING BROM ROUTINE...",
-                        fontSize = 14.sp,
+                        fontSize = 13.sp,
                         fontWeight = FontWeight.Bold,
                         letterSpacing = 1.sp
                     )
@@ -188,7 +191,7 @@ fun MtkServiceScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = "START SERVICE",
-                            fontSize = 14.sp,
+                            fontSize = 13.5.sp,
                             fontWeight = FontWeight.Bold,
                             letterSpacing = 1.sp
                         )
@@ -196,9 +199,9 @@ fun MtkServiceScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
-            // 5. Terminal Log Box (Flexible weight ensuring safe space above 3-button nav)
+            // 5. Terminal Log Box (Flexible weight ensuring safe drawing)
             TerminalLogBox(
                 logs = state.logs,
                 listState = listState,
@@ -239,7 +242,7 @@ private fun HeaderSection(
         ) {
             Box(
                 modifier = Modifier
-                    .size(38.dp)
+                    .size(36.dp)
                     .clip(RoundedCornerShape(10.dp))
                     .background(MtkPrimary)
                     .shadow(elevation = 6.dp, shape = RoundedCornerShape(10.dp)),
@@ -249,7 +252,7 @@ private fun HeaderSection(
                     text = "M",
                     color = MtkOnPrimary,
                     fontWeight = FontWeight.Black,
-                    fontSize = 20.sp
+                    fontSize = 19.sp
                 )
             }
 
@@ -257,16 +260,16 @@ private fun HeaderSection(
                 Text(
                     text = "MTK Service Tool",
                     color = MtkTextPrimary,
-                    fontSize = 17.sp,
+                    fontSize = 16.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = (-0.3).sp
                 )
                 Text(
-                    text = "BROM Mode / USB Host API",
+                    text = "BROM Mode / Byte-to-Byte Protocol",
                     color = MtkTextSecondary,
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Medium,
-                    letterSpacing = 1.sp
+                    letterSpacing = 0.5.sp
                 )
             }
         }
@@ -278,7 +281,7 @@ private fun HeaderSection(
             IconButton(
                 onClick = onInfoClick,
                 modifier = Modifier
-                    .size(34.dp)
+                    .size(32.dp)
                     .clip(CircleShape)
                     .border(1.dp, MtkBorder, CircleShape)
             ) {
@@ -286,14 +289,14 @@ private fun HeaderSection(
                     imageVector = Icons.Default.Info,
                     contentDescription = "Show MTK Protocol Workflow",
                     tint = MtkPrimary,
-                    modifier = Modifier.size(17.dp)
+                    modifier = Modifier.size(16.dp)
                 )
             }
 
             // Connection Status Dot
             Box(
                 modifier = Modifier
-                    .size(34.dp)
+                    .size(32.dp)
                     .clip(CircleShape)
                     .border(1.dp, Color.White.copy(alpha = 0.1f), CircleShape),
                 contentAlignment = Alignment.Center
@@ -317,35 +320,58 @@ private fun HeaderSection(
 }
 
 @Composable
-private fun BrandModelSelectionSection(
+private fun SelectionSection(
     brands: List<Brand>,
     selectedBrand: Brand,
     selectedModel: MtkModel,
+    authHandlers: List<AuthHandlerType>,
+    selectedAuthHandler: AuthHandlerType,
     onBrandSelected: (Brand) -> Unit,
     onModelSelected: (MtkModel) -> Unit,
+    onAuthHandlerSelected: (AuthHandlerType) -> Unit,
     enabled: Boolean
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        // Brand Selector Dropdown
-        DropdownSelector(
-            label = "Device Brand",
-            selectedText = selectedBrand.name,
-            items = brands,
-            getItemLabel = { it.name },
-            onItemSelected = onBrandSelected,
-            enabled = enabled,
-            testTag = "brand_spinner"
-        )
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            // Brand Selector Dropdown
+            Box(modifier = Modifier.weight(1f)) {
+                DropdownSelector(
+                    label = "Brand",
+                    selectedText = selectedBrand.name,
+                    items = brands,
+                    getItemLabel = { it.name },
+                    onItemSelected = onBrandSelected,
+                    enabled = enabled,
+                    testTag = "brand_spinner"
+                )
+            }
 
-        // Model Selector Dropdown
+            // Model Selector Dropdown
+            Box(modifier = Modifier.weight(1f)) {
+                DropdownSelector(
+                    label = "Model",
+                    selectedText = selectedModel.name,
+                    items = selectedBrand.models,
+                    getItemLabel = { it.name },
+                    onItemSelected = onModelSelected,
+                    enabled = enabled,
+                    testTag = "model_spinner"
+                )
+            }
+        }
+
+        // Multi-Auth Handler Selector Dropdown
         DropdownSelector(
-            label = "Device Model",
-            selectedText = selectedModel.name,
-            items = selectedBrand.models,
-            getItemLabel = { it.name },
-            onItemSelected = onModelSelected,
+            label = "Auth Bypass Handler",
+            selectedText = selectedAuthHandler.title,
+            items = authHandlers,
+            getItemLabel = { it.title },
+            onItemSelected = onAuthHandlerSelected,
             enabled = enabled,
-            testTag = "model_spinner"
+            testTag = "auth_handler_spinner"
         )
     }
 }
@@ -367,12 +393,12 @@ private fun <T> DropdownSelector(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(52.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .border(1.dp, if (expanded) MtkPrimary else MtkBorder, RoundedCornerShape(14.dp))
+                .height(48.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .border(1.dp, if (expanded) MtkPrimary else MtkBorder, RoundedCornerShape(12.dp))
                 .background(MtkSurface)
                 .clickable(enabled = enabled) { expanded = true }
-                .padding(horizontal = 14.dp)
+                .padding(horizontal = 12.dp)
                 .testTag(testTag),
             contentAlignment = Alignment.CenterStart
         ) {
@@ -384,7 +410,7 @@ private fun <T> DropdownSelector(
                 Text(
                     text = selectedText,
                     color = if (enabled) MtkTextPrimary else MtkTextSecondary,
-                    fontSize = 13.5.sp,
+                    fontSize = 12.5.sp,
                     fontWeight = FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -393,7 +419,8 @@ private fun <T> DropdownSelector(
                 Icon(
                     imageVector = Icons.Default.ArrowDropDown,
                     contentDescription = null,
-                    tint = MtkTextSecondary
+                    tint = MtkTextSecondary,
+                    modifier = Modifier.size(20.dp)
                 )
             }
         }
@@ -402,13 +429,13 @@ private fun <T> DropdownSelector(
         Surface(
             color = MtkBackground,
             modifier = Modifier
-                .padding(start = 12.dp)
-                .offset(y = (-8).dp)
+                .padding(start = 10.dp)
+                .offset(y = (-7).dp)
         ) {
             Text(
                 text = " $label ",
                 color = if (expanded) MtkPrimary else MtkPrimary.copy(alpha = 0.85f),
-                fontSize = 11.sp,
+                fontSize = 10.5.sp,
                 fontWeight = FontWeight.SemiBold
             )
         }
@@ -426,7 +453,7 @@ private fun <T> DropdownSelector(
                         Text(
                             text = getItemLabel(item),
                             color = MtkTextPrimary,
-                            fontSize = 13.sp
+                            fontSize = 12.5.sp
                         )
                     },
                     onClick = {
@@ -462,7 +489,7 @@ private fun TerminalLogBox(
                 Text(
                     text = "TERMINAL LOG",
                     color = MtkTextSecondary,
-                    fontSize = 10.5.sp,
+                    fontSize = 10.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 1.sp
                 )
@@ -481,40 +508,40 @@ private fun TerminalLogBox(
                 Text(
                     text = "Baud: 115200",
                     color = MtkPrimary,
-                    fontSize = 10.sp,
+                    fontSize = 9.5.sp,
                     fontFamily = FontFamily.Monospace
                 )
                 IconButton(
                     onClick = onClearLogs,
-                    modifier = Modifier.size(22.dp)
+                    modifier = Modifier.size(20.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Clear,
                         contentDescription = "Clear logs",
                         tint = MtkTextSecondary,
-                        modifier = Modifier.size(13.dp)
+                        modifier = Modifier.size(12.dp)
                     )
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(4.dp))
+        Spacer(modifier = Modifier.height(2.dp))
 
         // Terminal Output Screen
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .clip(RoundedCornerShape(16.dp))
+                .clip(RoundedCornerShape(14.dp))
                 .background(MtkTerminalBg)
-                .border(1.dp, MtkBorder, RoundedCornerShape(16.dp))
-                .padding(10.dp)
+                .border(1.dp, MtkBorder, RoundedCornerShape(14.dp))
+                .padding(8.dp)
                 .testTag("terminal_log_box")
         ) {
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
+                verticalArrangement = Arrangement.spacedBy(3.dp)
             ) {
                 items(logs, key = { it.id }) { log ->
                     LogItemView(log)
@@ -545,15 +572,15 @@ private fun LogItemView(log: LogEntry) {
             text = "[${log.level.name}] ",
             color = badgeColor,
             fontFamily = FontFamily.Monospace,
-            fontSize = 11.sp,
+            fontSize = 10.5.sp,
             fontWeight = FontWeight.Bold
         )
         Text(
             text = log.message,
             color = textColor,
             fontFamily = FontFamily.Monospace,
-            fontSize = 11.sp,
-            lineHeight = 15.sp
+            fontSize = 10.5.sp,
+            lineHeight = 14.sp
         )
     }
 }
@@ -562,11 +589,11 @@ private fun LogItemView(log: LogEntry) {
 private fun ExplanationCard(onDismiss: () -> Unit) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MtkSurfaceVariant),
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(12.dp),
         border = androidx.compose.foundation.BorderStroke(1.dp, MtkPrimary.copy(alpha = 0.4f)),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
+        Column(modifier = Modifier.padding(10.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -575,26 +602,26 @@ private fun ExplanationCard(onDismiss: () -> Unit) {
                 Text(
                     text = "MTK BROM Auth Bypass Architecture",
                     color = MtkPrimary,
-                    fontSize = 12.5.sp,
+                    fontSize = 12.sp,
                     fontWeight = FontWeight.Bold
                 )
-                IconButton(onClick = onDismiss, modifier = Modifier.size(22.dp)) {
+                IconButton(onClick = onDismiss, modifier = Modifier.size(20.dp)) {
                     Icon(
                         imageVector = Icons.Default.Clear,
                         contentDescription = "Close",
                         tint = MtkTextSecondary,
-                        modifier = Modifier.size(15.dp)
+                        modifier = Modifier.size(14.dp)
                     )
                 }
             }
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(3.dp))
             Text(
-                text = "၁။ BROM Handshake: Android UsbManager ကနေ OTG ချိတ်ဆက်ထားတဲ့ MTK Chipset (VID:0x0E8D) ကို ရှာဖွေပြီး 0xA0 0x0A 0x50 0x05 handshake byte sequence ဖြင့် ချိတ်ဆက်ပါတယ်။\n" +
-                       "၂။ SLA/DAA EP0 Exploit: MediaTek USB Control Transfer handler (EP0) ရဲ့ buffer vulnerability ကို အသုံးပြုပြီး Watchdog Timer ကို ပိတ်ကာ SRAM အတွင်းရှိ SLA / DAA auth flag ကို patch လုပ်ပါတယ်။\n" +
-                       "၃။ Device Info: Auth bypass ပြီးတာနဲ့ CMD_GET_HW_CODE (0xFD), Target Config (0xD8), MEID (0xE1), SOC ID (0xE7) များကို တိုက်ရိုက် Read/Write ပြုလုပ်ပါတယ်။",
+                text = "၁။ BROM Handshake: Android UsbManager မှ OTG ချိတ်ဆက်ထားသော MTK Chipset (VID:0x0E8D) သို့ 0xA0 0x0A 0x50 0x05 byte sequence ကို Bitwise Inverted Complement (0x5F, 0xF5, 0xAF, 0xFA) စစ်ဆေးကာ Strict Sync ပြုလုပ်ပါသည်။\n" +
+                       "၂။ Multi-Auth Bypass: EP0 Control Transfer (0xA1/0xC0), Chunked Bulk Delivery သို့မဟုတ် Direct Register Override (Write32) နည်းလမ်းများဖြင့် WDT နှင့် SLA/DAA Flag များကို patch လုပ်ပါသည်။\n" +
+                       "၃။ Device Info & Reboot: HW Code (0xFD), Target Config (0xD8), MEID (0xE1), SOC ID (0xE7) ဖတ်ယူပြီး Watchdog Timer ဖြင့် Auto-Reboot ပြုလုပ်ပေးပါသည်။",
                 color = MtkTextPrimary,
-                fontSize = 10.5.sp,
-                lineHeight = 15.sp
+                fontSize = 10.sp,
+                lineHeight = 14.sp
             )
         }
     }

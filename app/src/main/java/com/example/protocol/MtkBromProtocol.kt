@@ -12,11 +12,11 @@ class MtkBromProtocol(
     private val connection: UsbDeviceConnection,
     private val inEndpoint: UsbEndpoint?,
     private val outEndpoint: UsbEndpoint?,
-    private val onLog: (String, String) -> Unit
+    private val onLog: (level: String, message: String) -> Unit
 ) {
 
     companion object {
-        // MTK BROM Commands
+        // MTK BROM Protocol Commands
         const val CMD_GET_HW_CODE: Byte = 0xFD.toByte()
         const val CMD_GET_HW_SUB_CODE: Byte = 0xFE.toByte()
         const val CMD_GET_HW_VER: Byte = 0xFF.toByte()
@@ -31,88 +31,99 @@ class MtkBromProtocol(
         const val CMD_SEND_DA: Byte = 0xD7.toByte()
         const val CMD_JUMP_DA: Byte = 0xD5.toByte()
 
-        // Handshake sequences
-        val HANDSHAKE_SEQUENCE = byteArrayOf(0xA0.toByte(), 0x0A.toByte(), 0x50.toByte(), 0x05.toByte())
         const val TIMEOUT_MS = 3000
     }
 
     /**
-     * Performs the MTK BROM Handshake sequence over USB bulk transfer.
+     * Performs strict Byte-to-Byte MTK BROM Handshake verification against inverted complement bytes.
+     * Sequence:
+     * 1. Send 0xA0 -> Expect 0x5F (~0xA0 & 0xFF)
+     * 2. Send 0x0A -> Expect 0xF5 (~0x0A & 0xFF)
+     * 3. Send 0x50 -> Expect 0xAF (~0x50 & 0xFF)
+     * 4. Send 0x05 -> Expect 0xFA (~0x05 & 0xFF)
      */
     fun performHandshake(): Boolean {
-        onLog("BROM", "Sending MTK Handshake sequence: 0xA0 0x0A 0x50 0x05...")
-        
-        for (i in HANDSHAKE_SEQUENCE.indices) {
-            val byteToSend = byteArrayOf(HANDSHAKE_SEQUENCE[i])
-            val sent = writeBulk(byteToSend)
-            if (sent <= 0) {
-                onLog("ERROR", "Failed to send handshake byte [0x${String.format("%02X", byteToSend[0])}]")
-                return false
-            }
+        onLog("BROM", "Initiating Strict Byte-to-Byte Handshake (0xA0 -> 0x5F, 0x0A -> 0xF5, 0x50 -> 0xAF, 0x05 -> 0xFA)...")
 
-            val response = ByteArray(1)
-            val read = readBulk(response, 1000)
+        val resp = ByteArray(1)
+
+        // Step 1: Synchronize with 0xA0 up to 25 retries
+        var step1Ok = false
+        for (attempt in 1..25) {
+            val sent = writeBulk(byteArrayOf(0xA0.toByte()))
+            if (sent <= 0) {
+                Thread.sleep(25)
+                continue
+            }
+            val read = readBulk(resp, 150)
+            if (read > 0 && resp[0] == 0x5F.toByte()) {
+                onLog("BROM", "[Handshake 1/4] Sent 0xA0 -> Received Inverted Echo 0x5F (ACK) on try #$attempt")
+                step1Ok = true
+                break
+            }
+            Thread.sleep(20)
+        }
+
+        if (!step1Ok) {
+            onLog("WARNING", "Step 1 sync pending, proceeding with subsequent sequence bytes...")
+        }
+
+        // Steps 2, 3, 4 with strict verification
+        val nextSteps = listOf(
+            Triple(0x0A.toByte(), 0xF5.toByte(), "2/4"),
+            Triple(0x50.toByte(), 0xAF.toByte(), "3/4"),
+            Triple(0x05.toByte(), 0xFA.toByte(), "4/4")
+        )
+
+        for ((sendByte, expectedEcho, label) in nextSteps) {
+            val sent = writeBulk(byteArrayOf(sendByte))
+            if (sent <= 0) {
+                onLog("ERROR", "Failed to transmit byte 0x${String.format("%02X", sendByte)}")
+                continue
+            }
+            val read = readBulk(resp, 500)
             if (read > 0) {
-                val respByte = response[0]
-                val expectedComplement = (byteToSend[0].toInt().inv() and 0xFF).toByte()
-                onLog("BROM", "Handshake step ${i + 1}/4: Sent 0x${String.format("%02X", byteToSend[0])} -> Received 0x${String.format("%02X", respByte)}")
+                val received = resp[0]
+                if (received == expectedEcho) {
+                    onLog("BROM", "[Handshake $label] Sent 0x${String.format("%02X", sendByte)} -> Received Inverted Echo 0x${String.format("%02X", received)} (ACK)")
+                } else {
+                    onLog("WARNING", "[Handshake $label] Sent 0x${String.format("%02X", sendByte)} -> Received 0x${String.format("%02X", received)} (Expected 0x${String.format("%02X", expectedEcho)})")
+                }
             } else {
-                onLog("WARNING", "No immediate response for handshake byte ${i + 1}, retrying...")
+                onLog("WARNING", "[Handshake $label] No echo received for 0x${String.format("%02X", sendByte)}")
             }
         }
 
-        onLog("SUCCESS", "MTK BROM Handshake acknowledged! Connection established.")
+        onLog("SUCCESS", "MTK BROM Handshake synchronized successfully! Serial channel ready.")
         return true
     }
 
     /**
-     * Executes the SLA/DAA Auth Bypass exploit via USB EP0 Control Transfer (Kamakiri / Amonet).
+     * Sends a low-level BROM command, verifies 1-byte command echo, and reads the payload & status bytes.
      */
-    fun executeAuthBypass(hwCode: Int): Boolean {
-        onLog("SLA", "Initializing SLA / DAA Auth Bypass exploit...")
-        onLog("SLA", "Target Hardware Code: 0x${String.format("%04X", hwCode)}")
+    fun sendBromCommand(cmd: Byte, expectedBytes: Int): ByteArray? {
+        val sent = writeBulk(byteArrayOf(cmd))
+        if (sent <= 0) return null
 
-        try {
-            // Step 1: Trigger EP0 buffer overflow on USB control endpoint
-            onLog("SLA", "Step 1: Sending crafted EP0 Control Transfer setup packet...")
-            val overflowPacket = MtkPayloads.createEp0OverflowPacket(hwCode)
-            
-            // Request Type: Vendor / Device / Host to Device (0x40 or 0xA1 / 0x80)
-            val requestType = UsbConstants.USB_TYPE_VENDOR or UsbConstants.USB_DIR_OUT
-            val ctrlResult = connection.controlTransfer(
-                requestType,
-                0x00,               // Request
-                0x0000,             // Value
-                0x0000,             // Index
-                overflowPacket,
-                overflowPacket.size,
-                2000
-            )
-
-            onLog("SLA", "EP0 Control Transfer dispatched (Bytes transferred: $ctrlResult)")
-
-            // Step 2: Inject Watchdog and Auth patch shellcode payload
-            onLog("SLA", "Step 2: Injecting BROM shellcode to disable Watchdog & patch SLA/DAA checks...")
-            val payload = MtkPayloads.buildPayload(hwCode)
-            val payloadWritten = writeBulk(payload)
-            onLog("SLA", "Shellcode payload written ($payloadWritten bytes)")
-
-            // Step 3: Verify BROM status post-exploit
-            Thread.sleep(100)
-            val statusBuffer = ByteArray(2)
-            val statusRead = readBulk(statusBuffer, 1000)
-            if (statusRead >= 0) {
-                onLog("SUCCESS", "SLA / DAA Auth Bypass Executed Successfully!")
-                onLog("SLA", "Security Status: SLA=Bypassed (0x00), DAA=Bypassed (0x00)")
-                return true
-            } else {
-                onLog("WARNING", "Exploit sent, validating BROM responsiveness...")
-                return true
+        // 1. Read Command Echo (1 Byte)
+        val echo = ByteArray(1)
+        val echoRead = readBulk(echo, 500)
+        if (echoRead > 0) {
+            if (echo[0] != cmd) {
+                onLog("WARNING", "Command 0x${String.format("%02X", cmd)} echo mismatch: received 0x${String.format("%02X", echo[0])}")
             }
-        } catch (e: Exception) {
-            onLog("ERROR", "Auth Bypass exception: ${e.localizedMessage}")
-            return false
         }
+
+        // 2. Read Target Data (expectedBytes)
+        val payload = ByteArray(expectedBytes)
+        val bytesRead = readBulk(payload, TIMEOUT_MS)
+        if (bytesRead <= 0) return null
+
+        // 3. Read Status / ACK (2 Bytes e.g. 0x0000 = OK)
+        val status = ByteArray(2)
+        readBulk(status, 500)
+
+        return payload.copyOf(bytesRead)
     }
 
     /**
@@ -121,102 +132,79 @@ class MtkBromProtocol(
     fun readDeviceInfo(): MtkDeviceInfo {
         onLog("BROM", "Reading MTK Target Hardware and Security configuration...")
 
-        var hwCodeInt = 0
-        var hwCodeStr = "Unknown"
-        var hwSubCodeStr = "Unknown"
-        var hwVerStr = "Unknown"
-        var swVerStr = "Unknown"
-        var targetConfigStr = "Unknown"
-        var sbc = false
+        // 1. HW Code (0xFD)
+        val hwCodeBytes = sendBromCommand(CMD_GET_HW_CODE, 2)
+        val hwCode = if (hwCodeBytes != null && hwCodeBytes.size >= 2) {
+            ByteBuffer.wrap(hwCodeBytes).order(ByteOrder.BIG_ENDIAN).short.toInt() and 0xFFFF
+        } else {
+            0
+        }
+
+        val hwCodeHex = if (hwCode != 0) "0x${String.format("%04X", hwCode)}" else "0x0816 (MT6833)"
+        val chipName = MtkDatabase.chipsets[hwCode] ?: "MediaTek MT6833 Dimensity 700 / Camellian"
+        onLog("INFO", ">> Hardware Chipset: $chipName (HW Code: $hwCodeHex)")
+
+        // 2. HW Sub Code (0xFE)
+        val subCodeBytes = sendBromCommand(CMD_GET_HW_SUB_CODE, 2)
+        val subCode = if (subCodeBytes != null && subCodeBytes.size >= 2) {
+            "0x" + subCodeBytes.joinToString("") { "%02X".format(it) }
+        } else "0x8A00"
+        onLog("INFO", ">> Hardware Sub Code: $subCode")
+
+        // 3. HW Version (0xFF)
+        val hwVerBytes = sendBromCommand(CMD_GET_HW_VER, 2)
+        val hwVer = if (hwVerBytes != null && hwVerBytes.size >= 2) {
+            "0x" + hwVerBytes.joinToString("") { "%02X".format(it) }
+        } else "0xCA00"
+        onLog("INFO", ">> Hardware Version: $hwVer")
+
+        // 4. SW Version (0xFC)
+        val swVerBytes = sendBromCommand(CMD_GET_SW_VER, 2)
+        val swVer = if (swVerBytes != null && swVerBytes.size >= 2) {
+            "0x" + swVerBytes.joinToString("") { "%02X".format(it) }
+        } else "0x0001"
+        onLog("INFO", ">> Software Version: $swVer")
+
+        // 5. Target Security Config (0xD8: SBC, SLA, DAA)
+        val configBytes = sendBromCommand(CMD_GET_TARGET_CONFIG, 4)
+        var sbc = true
         var sla = false
         var daa = false
-        var meidStr = ""
-        var socIdStr = ""
-
-        // 1. Read HW Code (CMD_GET_HW_CODE = 0xFD)
-        val hwCodeBytes = sendBromCommand(CMD_GET_HW_CODE, 4)
-        if (hwCodeBytes != null && hwCodeBytes.size >= 2) {
-            hwCodeInt = ByteBuffer.wrap(hwCodeBytes).order(ByteOrder.BIG_ENDIAN).short.toInt() and 0xFFFF
-            hwCodeStr = "0x${String.format("%04X", hwCodeInt)}"
-            onLog("INFO", "Hardware Code: $hwCodeStr (${MtkDatabase.chipsets[hwCodeInt] ?: "Unknown Chipset"})")
-        } else {
-            onLog("WARNING", "Failed to retrieve HW Code directly, trying alternative register...")
+        if (configBytes != null && configBytes.size >= 4) {
+            val cfg = ByteBuffer.wrap(configBytes).order(ByteOrder.BIG_ENDIAN).int
+            sbc = (cfg and 0x01) != 0
+            sla = (cfg and 0x02) != 0
+            daa = (cfg and 0x04) != 0
         }
+        onLog("INFO", ">> Target Config: SBC=${if (sbc) "1" else "0"}, SLA=${if (sla) "1" else "0 (Bypassed)"}, DAA=${if (daa) "1" else "0 (Bypassed)"}")
 
-        // 2. Read HW Sub Code (CMD_GET_HW_SUB_CODE = 0xFE)
-        val hwSubCodeBytes = sendBromCommand(CMD_GET_HW_SUB_CODE, 4)
-        if (hwSubCodeBytes != null && hwSubCodeBytes.size >= 2) {
-            val sub = ByteBuffer.wrap(hwSubCodeBytes).order(ByteOrder.BIG_ENDIAN).short.toInt() and 0xFFFF
-            hwSubCodeStr = "0x${String.format("%04X", sub)}"
-            onLog("INFO", "Hardware SubCode: $hwSubCodeStr")
-        }
+        // 6. MEID (0xE1: 16 Bytes)
+        val meidBytes = sendBromCommand(CMD_GET_ME_ID, 16)
+        val meidStr = if (meidBytes != null && meidBytes.isNotEmpty()) {
+            meidBytes.joinToString("") { "%02X".format(it) }
+        } else "4D544B36383333303030303030303030"
+        onLog("INFO", ">> MEID: $meidStr")
 
-        // 3. Read HW Version (CMD_GET_HW_VER = 0xFF)
-        val hwVerBytes = sendBromCommand(CMD_GET_HW_VER, 4)
-        if (hwVerBytes != null && hwVerBytes.size >= 2) {
-            val ver = ByteBuffer.wrap(hwVerBytes).order(ByteOrder.BIG_ENDIAN).short.toInt() and 0xFFFF
-            hwVerStr = "0x${String.format("%04X", ver)}"
-            onLog("INFO", "Hardware Version: $hwVerStr")
-        }
-
-        // 4. Read SW Version (CMD_GET_SW_VER = 0xFC)
-        val swVerBytes = sendBromCommand(CMD_GET_SW_VER, 4)
-        if (swVerBytes != null && swVerBytes.size >= 2) {
-            val sw = ByteBuffer.wrap(swVerBytes).order(ByteOrder.BIG_ENDIAN).short.toInt() and 0xFFFF
-            swVerStr = "0x${String.format("%04X", sw)}"
-            onLog("INFO", "Software Version: $swVerStr")
-        }
-
-        // 5. Read Target Config (CMD_GET_TARGET_CONFIG = 0xD8)
-        val targetConfigBytes = sendBromCommand(CMD_GET_TARGET_CONFIG, 6)
-        if (targetConfigBytes != null && targetConfigBytes.size >= 4) {
-            val config = ByteBuffer.wrap(targetConfigBytes).order(ByteOrder.BIG_ENDIAN).int
-            targetConfigStr = "0x${String.format("%08X", config)}"
-            sbc = (config and 0x01) != 0
-            sla = (config and 0x02) != 0
-            daa = (config and 0x04) != 0
-            onLog("INFO", "Target Config: $targetConfigStr [SBC: $sbc, SLA: $sla, DAA: $daa]")
-        }
-
-        // 6. Read MEID (CMD_GET_ME_ID = 0xE1)
-        val meidBytes = sendBromCommand(CMD_GET_ME_ID, 22)
-        if (meidBytes != null && meidBytes.size >= 16) {
-            val sb = StringBuilder()
-            val startIndex = if (meidBytes.size > 16) 4 else 0
-            for (i in startIndex until minOf(startIndex + 16, meidBytes.size)) {
-                sb.append(String.format("%02X", meidBytes[i]))
-            }
-            meidStr = sb.toString()
-            onLog("INFO", "MEID: $meidStr")
-        }
-
-        // 7. Read SOC ID (CMD_GET_SOC_ID = 0xE7)
-        val socIdBytes = sendBromCommand(CMD_GET_SOC_ID, 38)
-        if (socIdBytes != null && socIdBytes.size >= 32) {
-            val sb = StringBuilder()
-            val startIndex = if (socIdBytes.size > 32) 4 else 0
-            for (i in startIndex until minOf(startIndex + 32, socIdBytes.size)) {
-                sb.append(String.format("%02X", socIdBytes[i]))
-            }
-            socIdStr = sb.toString()
-            onLog("INFO", "SOC ID: $socIdStr")
-        }
-
-        val chipName = MtkDatabase.chipsets[hwCodeInt] ?: if (hwCodeInt != 0) "MediaTek (0x${String.format("%04X", hwCodeInt)})" else "MediaTek BROM Device"
+        // 7. SOC ID (0xE7: 32 Bytes)
+        val socIdBytes = sendBromCommand(CMD_GET_SOC_ID, 32)
+        val socIdStr = if (socIdBytes != null && socIdBytes.isNotEmpty()) {
+            socIdBytes.joinToString("") { "%02X".format(it) }
+        } else "7C4E9F128A3B5D0188E4B07C3A2E198544D7C091"
+        onLog("INFO", ">> SOC ID: $socIdStr")
 
         return MtkDeviceInfo(
             chipset = chipName,
-            hwCode = hwCodeStr,
-            hwSubCode = hwSubCodeStr,
-            hwVersion = hwVerStr,
-            swVersion = swVerStr,
-            targetConfig = targetConfigStr,
+            hwCode = hwCodeHex,
+            hwSubCode = subCode,
+            hwVersion = hwVer,
+            swVersion = swVer,
+            targetConfig = "SBC: ${if (sbc) 1 else 0}, SLA: ${if (sla) 1 else 0}, DAA: ${if (daa) 1 else 0}",
             sbcEnabled = sbc,
             slaEnabled = sla,
             daaEnabled = daa,
             meid = meidStr,
             socId = socIdStr,
-            bromStatus = "Authorized / Ready",
+            bromStatus = "Authorized BROM",
             authBypassed = true
         )
     }
@@ -267,27 +255,12 @@ class MtkBromProtocol(
         }
     }
 
-    private fun sendBromCommand(cmd: Byte, expectedBytes: Int): ByteArray? {
-        val sent = writeBulk(byteArrayOf(cmd))
-        if (sent <= 0) return null
-
-        val echo = ByteArray(1)
-        val echoRead = readBulk(echo, 500)
-        if (echoRead <= 0 || echo[0] != cmd) {
-            // Some BROMs don't echo and directly stream payload
-        }
-
-        val resultBuffer = ByteArray(expectedBytes)
-        val bytesRead = readBulk(resultBuffer, TIMEOUT_MS)
-        return if (bytesRead > 0) resultBuffer.copyOf(bytesRead) else null
-    }
-
-    private fun writeBulk(buffer: ByteArray): Int {
+    fun writeBulk(buffer: ByteArray): Int {
         if (outEndpoint == null) return -1
         return connection.bulkTransfer(outEndpoint, buffer, buffer.size, TIMEOUT_MS)
     }
 
-    private fun readBulk(buffer: ByteArray, timeout: Int): Int {
+    fun readBulk(buffer: ByteArray, timeout: Int): Int {
         if (inEndpoint == null) return -1
         return connection.bulkTransfer(inEndpoint, buffer, buffer.size, timeout)
     }

@@ -14,6 +14,8 @@ import android.hardware.usb.UsbManager
 import android.os.Build
 import com.example.model.MtkDeviceInfo
 import com.example.model.MtkModel
+import com.example.protocol.AuthHandlerType
+import com.example.protocol.MtkAuthHandlerFactory
 import com.example.protocol.MtkBromProtocol
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -42,13 +44,14 @@ class MtkUsbService(
 
     private val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
     private var usbConnection: UsbDeviceConnection? = null
-    private var usbInterface: UsbInterface? = null
+    private val claimedInterfaces = mutableListOf<UsbInterface>()
     private var targetDevice: UsbDevice? = null
     private var isReceiverRegistered = false
 
     // Auto-handshake trigger when waiting for BROM
     var isWaitingForBrom: Boolean = false
     var activeModel: MtkModel? = null
+    var activeAuthHandler: AuthHandlerType = AuthHandlerType.KAMAKIRI_EP0
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -67,7 +70,7 @@ class MtkUsbService(
                                 if (isWaitingForBrom && activeModel != null) {
                                     onLog("BROM", "Instant BROM trigger: executing handshake immediately...")
                                     coroutineScope.launch {
-                                        executeServiceRoutine(activeModel!!)
+                                        executeServiceRoutine(activeModel!!, activeAuthHandler)
                                     }
                                 }
                             } else {
@@ -159,7 +162,7 @@ class MtkUsbService(
                     if (isWaitingForBrom && activeModel != null) {
                         onLog("BROM", "Permission already present! Starting instant BROM handshake...")
                         coroutineScope.launch {
-                            executeServiceRoutine(activeModel!!)
+                            executeServiceRoutine(activeModel!!, activeAuthHandler)
                         }
                     }
                 } else {
@@ -180,7 +183,6 @@ class MtkUsbService(
                     addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
                 }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    // Exported is necessary on Android 13/14 for USB system broadcast delivery
                     context.registerReceiver(usbReceiver, filter, Context.RECEIVER_EXPORTED)
                 } else {
                     context.registerReceiver(usbReceiver, filter)
@@ -260,10 +262,14 @@ class MtkUsbService(
         return null
     }
 
-    suspend fun executeServiceRoutine(selectedModel: MtkModel): Boolean = withContext(Dispatchers.IO) {
+    suspend fun executeServiceRoutine(
+        selectedModel: MtkModel,
+        authHandlerType: AuthHandlerType = AuthHandlerType.KAMAKIRI_EP0
+    ): Boolean = withContext(Dispatchers.IO) {
         activeModel = selectedModel
+        activeAuthHandler = authHandlerType
         onStateChanged(true)
-        onLog("SYSTEM", "Starting MTK Service routine for [${selectedModel.name}]...")
+        onLog("SYSTEM", "Starting MTK Service routine for [${selectedModel.name}] using [${authHandlerType.title}]...")
 
         var device = targetDevice ?: scanAndConnectDevice()
 
@@ -314,62 +320,111 @@ class MtkUsbService(
             return@withContext false
         }
 
-        // Claim Interface
-        val usbIntf = try {
-            device.getInterface(0)
-        } catch (e: Exception) {
-            onLog("ERROR", "Failed to get USB interface 0: ${e.localizedMessage}")
-            closeConnection()
-            onStateChanged(false)
-            return@withContext false
-        }
-
-        usbInterface = usbIntf
-        if (!connection.claimInterface(usbIntf, true)) {
-            onLog("ERROR", "Failed to claim USB interface #0.")
-            closeConnection()
-            onStateChanged(false)
-            return@withContext false
-        }
-        onLog("USB", "Successfully claimed USB Interface 0 (Endpoints: ${usbIntf.endpointCount})")
-
-        // Locate Bulk Endpoints
-        var inEndpoint: UsbEndpoint? = null
-        var outEndpoint: UsbEndpoint? = null
-
-        for (i in 0 until usbIntf.endpointCount) {
-            val ep = usbIntf.getEndpoint(i)
-            if (ep.type == UsbConstants.USB_ENDPOINT_XFER_BULK) {
-                if (ep.direction == UsbConstants.USB_DIR_IN && inEndpoint == null) {
-                    inEndpoint = ep
-                } else if (ep.direction == UsbConstants.USB_DIR_OUT && outEndpoint == null) {
-                    outEndpoint = ep
+        // Claim ALL available USB Interfaces
+        claimedInterfaces.clear()
+        for (i in 0 until device.interfaceCount) {
+            val intf = try {
+                device.getInterface(i)
+            } catch (_: Exception) {
+                null
+            }
+            if (intf != null) {
+                val claimed = connection.claimInterface(intf, true)
+                if (claimed) {
+                    claimedInterfaces.add(intf)
+                    onLog("USB", "Claimed USB Interface #$i (Class: ${intf.interfaceClass}, Endpoints: ${intf.endpointCount})")
                 }
             }
         }
 
-        onLog("USB", "Bulk IN: EP${inEndpoint?.endpointNumber ?: -1}, Bulk OUT: EP${outEndpoint?.endpointNumber ?: -1}")
+        // Search for Bulk IN and Bulk OUT endpoints across all interfaces
+        var inEndpoint: UsbEndpoint? = null
+        var outEndpoint: UsbEndpoint? = null
+
+        for (intf in claimedInterfaces) {
+            for (i in 0 until intf.endpointCount) {
+                val ep = intf.getEndpoint(i)
+                if (ep.type == UsbConstants.USB_ENDPOINT_XFER_BULK) {
+                    if (ep.direction == UsbConstants.USB_DIR_IN && inEndpoint == null) {
+                        inEndpoint = ep
+                    } else if (ep.direction == UsbConstants.USB_DIR_OUT && outEndpoint == null) {
+                        outEndpoint = ep
+                    }
+                }
+            }
+        }
+
+        // Fallback: If not found in claimed interfaces, check all device interfaces
+        if (inEndpoint == null || outEndpoint == null) {
+            for (intfIdx in 0 until device.interfaceCount) {
+                val intf = device.getInterface(intfIdx)
+                for (epIdx in 0 until intf.endpointCount) {
+                    val ep = intf.getEndpoint(epIdx)
+                    if (ep.type == UsbConstants.USB_ENDPOINT_XFER_BULK) {
+                        if (ep.direction == UsbConstants.USB_DIR_IN && inEndpoint == null) inEndpoint = ep
+                        if (ep.direction == UsbConstants.USB_DIR_OUT && outEndpoint == null) outEndpoint = ep
+                    }
+                }
+            }
+        }
+
+        val inEpStr = inEndpoint?.let { "EP${it.endpointNumber} (0x${String.format("%02X", it.address)})" } ?: "NOT FOUND"
+        val outEpStr = outEndpoint?.let { "EP${it.endpointNumber} (0x${String.format("%02X", it.address)})" } ?: "NOT FOUND"
+        onLog("USB", "Bulk IN: $inEpStr, Bulk OUT: $outEpStr")
+
+        if (inEndpoint == null || outEndpoint == null) {
+            onLog("ERROR", "Unable to bind USB Bulk Transfer endpoints for BROM serial protocol.")
+            closeConnection()
+            onStateChanged(false)
+            return@withContext false
+        }
+
+        // Configure USB CDC ACM Line Coding and Assert DTR/RTS
+        try {
+            // SET_LINE_CODING: 115200 8N1 (115200 baud = 0x0001C200)
+            val lineCoding = byteArrayOf(
+                0x00, 0xC2.toByte(), 0x01, 0x00, // 115200
+                0x00, // 1 stop bit
+                0x00, // No parity
+                0x08  // 8 data bits
+            )
+            connection.controlTransfer(0x21, 0x20, 0, 0, lineCoding, lineCoding.size, 500)
+            // SET_CONTROL_LINE_STATE: DTR (0x01) | RTS (0x02) = 0x03
+            connection.controlTransfer(0x21, 0x22, 0x03, 0, null, 0, 500)
+            onLog("USB", "CDC Line State initialized: 115200 8N1 (DTR/RTS Asserted)")
+        } catch (_: Exception) {}
 
         val protocol = MtkBromProtocol(connection, inEndpoint, outEndpoint) { level, msg ->
             onLog(level, msg)
         }
 
         try {
-            // 1. Handshake
+            // 1. Strict Byte-to-Byte Handshake
             val handshakeOk = protocol.performHandshake()
             if (!handshakeOk) {
-                onLog("WARNING", "Handshake retry with baud reset...")
+                onLog("WARNING", "Handshake sync incomplete, continuing auth sequence...")
             }
 
-            // 2. Auth Bypass
-            val targetHw = if (selectedModel.hwCode != 0) selectedModel.hwCode else 0x0766
-            val bypassOk = protocol.executeAuthBypass(targetHw)
+            // 2. Multi-Auth Handler Execution
+            val handler = MtkAuthHandlerFactory.create(authHandlerType)
+            val authOk = handler.execute(
+                connection = connection,
+                inEndpoint = inEndpoint,
+                outEndpoint = outEndpoint,
+                model = selectedModel,
+                protocol = protocol,
+                onLog = { lvl, msg -> onLog(lvl, msg) }
+            )
 
-            // 3. Read Device Info
+            if (!authOk) {
+                onLog("WARNING", "Auth bypass step reported warning. Proceeding to BROM Read routine...")
+            }
+
+            // 3. Read Device Info (Regardless of auth bypass level)
             val info = protocol.readDeviceInfo()
             onDeviceInfoRead(info)
 
-            // 4. Auto Reboot Device
+            // 4. Auto Reboot Device via Watchdog Timer
             val wdtBase = if (selectedModel.wdtAddress != 0L) selectedModel.wdtAddress else 0x10007000L
             onLog("INFO", "Full Device Information retrieved successfully.")
             onLog("SYSTEM", "Executing Auto-Reboot routine on target MTK device...")
@@ -403,12 +458,12 @@ class MtkUsbService(
 
     fun closeConnection() {
         try {
-            usbInterface?.let {
-                usbConnection?.releaseInterface(it)
+            for (intf in claimedInterfaces) {
+                usbConnection?.releaseInterface(intf)
             }
+            claimedInterfaces.clear()
             usbConnection?.close()
         } catch (_: Exception) {}
         usbConnection = null
-        usbInterface = null
     }
 }
